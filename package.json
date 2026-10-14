@@ -1,0 +1,38 @@
+{
+  "name": "acme-salary-intelligence",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,green \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm --workspace @acme/api run dev",
+    "dev:web": "npm --workspace @acme/web run dev",
+    "prebuild": "npm run db:generate",
+    "build": "npm run build --workspace @acme/api && npm run build --workspace @acme/web",
+    "pretypecheck": "npm run db:generate",
+    "typecheck": "npm run typecheck --workspace @acme/api && npm run typecheck --workspace @acme/web",
+    "lint": "eslint .",
+    "pretest": "npm run db:generate",
+    "test": "npm run test --workspace @acme/api && npm run test --workspace @acme/web",
+    "test:e2e": "playwright test",
+    "db:generate": "npm --workspace @acme/api run db:generate",
+    "db:migrate": "npm --workspace @acme/api run db:migrate",
+    "db:seed": "npm --workspace @acme/api run db:seed",
+    "db:create-hr": "npm --workspace @acme/api run db:create-hr"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.29.0",
+    "concurrently": "^9.2.0",
+    "eslint": "^9.29.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "globals": "^16.3.0",
+    "prettier": "^3.6.2",
+    "@playwright/test": "^1.53.2",
+    "typescript-eslint": "^8.35.0"
+  }
+}

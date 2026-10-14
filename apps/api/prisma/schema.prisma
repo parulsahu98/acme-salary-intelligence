@@ -1,0 +1,71 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum EmploymentStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum Currency {
+  USD
+  EUR
+  GBP
+  INR
+  CAD
+  AUD
+  SGD
+  JPY
+  BHD
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique @db.VarChar(254)
+  passwordHash String   @map("password_hash") @db.VarChar(100)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("users")
+}
+
+model Employee {
+  id             String           @id @default(cuid())
+  employeeNumber String           @unique @map("employee_number") @db.VarChar(32)
+  fullName       String           @map("full_name") @db.VarChar(160)
+  email          String           @unique @db.VarChar(254)
+  department     String           @db.VarChar(100)
+  jobTitle       String           @map("job_title") @db.VarChar(120)
+  country        String           @db.VarChar(80)
+  currency       Currency
+  status         EmploymentStatus @default(ACTIVE)
+  currentSalary  Decimal          @map("current_salary") @db.Decimal(19, 4)
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+  salaryHistory  SalaryRevision[]
+
+  @@index([status, department])
+  @@index([country, status])
+  @@index([fullName])
+  @@map("employees")
+}
+
+model SalaryRevision {
+  id             String   @id @default(cuid())
+  employeeId     String   @map("employee_id")
+  previousSalary Decimal? @map("previous_salary") @db.Decimal(19, 4)
+  newSalary      Decimal  @map("new_salary") @db.Decimal(19, 4)
+  currency       Currency
+  effectiveAt    DateTime @default(now()) @map("effective_at") @db.Timestamptz(3)
+  reason         String?  @db.VarChar(500)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  employee       Employee @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+
+  @@index([employeeId, effectiveAt(sort: Desc)])
+  @@map("salary_revisions")
+}
