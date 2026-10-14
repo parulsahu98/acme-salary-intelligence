@@ -1,15 +1,25 @@
 import "dotenv/config";
 import { Prisma, PrismaClient } from "@prisma/client";
+import { readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
+  assertNeonSeedDatabaseEmpty,
+  assertSeedMigrationsCurrent,
+  assertSeedSchemaCompatible,
   assertSeedConfiguration,
   assertSeedDatabaseSafe,
   type ExistingEmployee,
   type ExistingSalaryRevision,
+  type SeedColumnRecord,
+  type SeedMigrationRecord,
+  type SeedTarget,
   type SyntheticEmployee,
 } from "./seed-safety.js";
 
-const databaseUrl = assertSeedConfiguration(process.env);
-const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+const target = assertSeedConfiguration(process.env);
+const prisma = new PrismaClient({
+  datasources: { db: { url: target.databaseUrl } },
+});
 const departments = [
   "Engineering",
   "Product",
@@ -88,6 +98,8 @@ async function verifyExistingDataset(
     Prisma.TransactionClient,
     "employee" | "salaryRevision" | "user"
   >,
+  seedTarget: SeedTarget,
+  afterInsert = false,
 ): Promise<boolean> {
   const [existingEmployees, existingRevisions, userCount] = await Promise.all([
     client.employee.findMany({
@@ -116,25 +128,108 @@ async function verifyExistingDataset(
     }),
     client.user.count(),
   ]);
-  return assertSeedDatabaseSafe(
-    employees,
-    existingEmployees.map((employee): ExistingEmployee => ({
+  const normalizedEmployees = existingEmployees.map(
+    (employee): ExistingEmployee => ({
       ...employee,
       currentSalary: employee.currentSalary.toString(),
-    })),
-    existingRevisions.map((revision): ExistingSalaryRevision => ({
+    }),
+  );
+  const normalizedRevisions = existingRevisions.map(
+    (revision): ExistingSalaryRevision => ({
       ...revision,
       previousSalary: revision.previousSalary?.toString() ?? null,
       newSalary: revision.newSalary.toString(),
-    })),
-    userCount,
+    }),
+  );
+  if (seedTarget.kind === "neon" && !afterInsert) {
+    assertNeonSeedDatabaseEmpty(normalizedEmployees, normalizedRevisions);
+    return true;
+  }
+  return assertSeedDatabaseSafe(
+    employees,
+    normalizedEmployees,
+    normalizedRevisions,
+    seedTarget.kind === "neon" ? 0 : userCount,
+  );
+}
+
+async function verifyDatabaseReady(
+  client: Pick<Prisma.TransactionClient, "$queryRaw">,
+): Promise<void> {
+  const localMigrationsPath = fileURLToPath(
+    new URL("./migrations/", import.meta.url),
+  );
+  const expectedMigrations = readdirSync(localMigrationsPath, {
+    withFileTypes: true,
+  })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  const migrationTable = await client.$queryRaw<
+    Array<{ migration_table: string | null }>
+  >`SELECT to_regclass('public._prisma_migrations')::text AS migration_table`;
+  if (!migrationTable[0]?.migration_table) {
+    throw new Error("Prisma migrations are missing; refusing to seed.");
+  }
+  const migrationRecords = await client.$queryRaw<SeedMigrationRecord[]>`
+    SELECT migration_name, finished_at, rolled_back_at
+    FROM public._prisma_migrations
+  `;
+  assertSeedMigrationsCurrent(expectedMigrations, migrationRecords);
+
+  const columns = await client.$queryRaw<SeedColumnRecord[]>`
+    SELECT table_name, column_name, udt_name, numeric_precision, numeric_scale
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name IN ('users', 'employees', 'salary_revisions')
+  `;
+  const constraints = await client.$queryRaw<Array<{ conname: string }>>`
+    SELECT conname
+    FROM pg_constraint
+    WHERE connamespace = 'public'::regnamespace
+    UNION
+    SELECT indexname AS conname
+    FROM pg_indexes
+    WHERE schemaname = 'public'
+  `;
+  assertSeedSchemaCompatible(
+    {
+      "users.id": "text::",
+      "users.email": "varchar::",
+      "users.password_hash": "varchar::",
+      "users.created_at": "timestamptz::",
+      "users.updated_at": "timestamptz::",
+      "employees.id": "text::",
+      "employees.employee_number": "varchar::",
+      "employees.full_name": "varchar::",
+      "employees.email": "varchar::",
+      "employees.department": "varchar::",
+      "employees.job_title": "varchar::",
+      "employees.country": "varchar::",
+      "employees.currency": "Currency::",
+      "employees.status": "EmploymentStatus::",
+      "employees.current_salary": "numeric:19:4",
+      "employees.created_at": "timestamptz::",
+      "employees.updated_at": "timestamptz::",
+      "salary_revisions.id": "text::",
+      "salary_revisions.employee_id": "text::",
+      "salary_revisions.previous_salary": "numeric:19:4",
+      "salary_revisions.new_salary": "numeric:19:4",
+      "salary_revisions.currency": "Currency::",
+      "salary_revisions.effective_at": "timestamptz::",
+      "salary_revisions.reason": "varchar::",
+      "salary_revisions.created_at": "timestamptz::",
+    },
+    columns,
+    constraints,
   );
 }
 
 try {
   await prisma.$transaction(
     async (tx) => {
-      const shouldInsert = await verifyExistingDataset(tx);
+      await verifyDatabaseReady(tx);
+      const shouldInsert = await verifyExistingDataset(tx, target);
       if (shouldInsert) {
         for (let offset = 0; offset < employees.length; offset += 500) {
           const batch = employees.slice(offset, offset + 500);
@@ -151,7 +246,7 @@ try {
           });
         }
       }
-      if (await verifyExistingDataset(tx)) {
+      if (await verifyExistingDataset(tx, target, true)) {
         throw new Error(
           "Synthetic seed verification failed: target still appears empty.",
         );

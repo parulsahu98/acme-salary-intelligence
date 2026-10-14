@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertNeonSeedDatabaseEmpty,
+  assertSeedMigrationsCurrent,
+  assertSeedSchemaCompatible,
   assertSeedConfiguration,
   assertSeedDatabaseSafe,
   type ExistingEmployee,
@@ -73,7 +76,7 @@ describe("synthetic seed configuration safeguards", () => {
   it("rejects production and non-allowlisted or remote database targets", () => {
     expect(() =>
       assertSeedConfiguration({ ...baseEnvironment, NODE_ENV: "production" }),
-    ).toThrow(/development or NODE_ENV=test/);
+    ).toThrow(/SEED_NEON_ONCE/);
     expect(() =>
       assertSeedConfiguration({
         ...baseEnvironment,
@@ -88,7 +91,7 @@ describe("synthetic seed configuration safeguards", () => {
         DATABASE_URL: remoteUrl,
         SEED_ALLOWED_DATABASE_URL: remoteUrl,
       }),
-    ).toThrow(/localhost/);
+    ).toThrow(/localhost PostgreSQL targets/);
     const unapprovedName =
       "postgresql://user@localhost:5432/other_database?schema=public";
     expect(() =>
@@ -101,7 +104,55 @@ describe("synthetic seed configuration safeguards", () => {
   });
 
   it("accepts only explicitly opted-in, allowlisted local test targets", () => {
-    expect(assertSeedConfiguration(baseEnvironment)).toBe(allowedUrl);
+    expect(assertSeedConfiguration(baseEnvironment)).toEqual({
+      databaseUrl: allowedUrl,
+      kind: "local",
+    });
+  });
+
+  it("requires all explicit approvals for one Neon production endpoint", () => {
+    const neonUrl =
+      "postgresql://seed-user:secret@ep-approved-branch.ap-southeast-1.aws.neon.tech/acme_prod?sslmode=require";
+    const neonEnvironment = {
+      NODE_ENV: "production",
+      SEED_SYNTHETIC_DATA: "YES",
+      SEED_NEON_ONCE: "YES",
+      DATABASE_URL: neonUrl,
+      SEED_ALLOWED_DATABASE_URL: neonUrl,
+      SEED_ALLOWED_NEON_HOST: "ep-approved-branch.ap-southeast-1.aws.neon.tech",
+      SEED_ALLOWED_NEON_DATABASE: "acme_prod",
+    };
+    expect(assertSeedConfiguration(neonEnvironment)).toEqual({
+      databaseUrl: neonUrl,
+      kind: "neon",
+    });
+    expect(() =>
+      assertSeedConfiguration({
+        ...neonEnvironment,
+        SEED_ALLOWED_NEON_HOST:
+          "ep-another-branch.ap-southeast-1.aws.neon.tech",
+      }),
+    ).toThrow(/approved Neon endpoint/);
+    expect(() =>
+      assertSeedConfiguration({
+        ...neonEnvironment,
+        SEED_ALLOWED_NEON_DATABASE: "another_database",
+      }),
+    ).toThrow(/approved Neon database/);
+    expect(() =>
+      assertSeedConfiguration({
+        ...neonEnvironment,
+        SEED_NEON_ONCE: undefined,
+      }),
+    ).toThrow(/SEED_NEON_ONCE/);
+    expect(() =>
+      assertSeedConfiguration({
+        ...neonEnvironment,
+        DATABASE_URL: "postgresql://user@db.example.com/acme_prod",
+        SEED_ALLOWED_DATABASE_URL: "postgresql://user@db.example.com/acme_prod",
+        SEED_ALLOWED_NEON_HOST: "db.example.com",
+      }),
+    ).toThrow(/approved Neon endpoint/);
   });
 });
 
@@ -141,5 +192,118 @@ describe("synthetic seed database safeguards", () => {
         0,
       ),
     ).toThrow(/salary history outside/);
+  });
+
+  it("requires empty employee and salary history tables for Neon seeding", () => {
+    expect(() => assertNeonSeedDatabaseEmpty([], [])).not.toThrow();
+    expect(() => assertNeonSeedDatabaseEmpty(existingEmployees, [])).toThrow(
+      /requires empty employee and salary history/,
+    );
+    expect(() => assertNeonSeedDatabaseEmpty([], existingRevisions)).toThrow(
+      /requires empty employee and salary history/,
+    );
+  });
+});
+
+describe("Prisma migration and schema checks", () => {
+  const migrations = [
+    "20261014120000_initial",
+    "20261014173000_previous_salary_constraint",
+  ];
+
+  it("requires every checked-in migration to be applied successfully", () => {
+    assertSeedMigrationsCurrent(
+      migrations,
+      migrations.map((migration_name) => ({
+        migration_name,
+        finished_at: new Date(),
+        rolled_back_at: null,
+      })),
+    );
+    expect(() => assertSeedMigrationsCurrent(migrations, [])).toThrow(
+      /not current/,
+    );
+    expect(() =>
+      assertSeedMigrationsCurrent(migrations, [
+        {
+          migration_name: migrations[0]!,
+          finished_at: null,
+          rolled_back_at: null,
+        },
+      ]),
+    ).toThrow(/incomplete Prisma migration/);
+  });
+
+  it("requires expected columns and relational/integrity constraints", () => {
+    const expectedColumns = {
+      "users.id": "text::",
+      "users.email": "varchar::",
+      "users.password_hash": "varchar::",
+      "employees.id": "text::",
+      "employees.employee_number": "varchar::",
+      "employees.current_salary": "numeric:19:4",
+      "salary_revisions.id": "text::",
+      "salary_revisions.employee_id": "text::",
+      "salary_revisions.new_salary": "numeric:19:4",
+    };
+    const actualColumns = [
+      ["users", "id", "text", null, null],
+      ["users", "email", "varchar", null, null],
+      ["users", "password_hash", "varchar", null, null],
+      ["employees", "id", "text", null, null],
+      ["employees", "employee_number", "varchar", null, null],
+      ["employees", "current_salary", "numeric", 19, 4],
+      ["salary_revisions", "id", "text", null, null],
+      ["salary_revisions", "employee_id", "text", null, null],
+      ["salary_revisions", "new_salary", "numeric", 19, 4],
+    ].map(
+      ([
+        table_name,
+        column_name,
+        udt_name,
+        numeric_precision,
+        numeric_scale,
+      ]) => ({
+        table_name: String(table_name),
+        column_name: String(column_name),
+        udt_name: String(udt_name),
+        numeric_precision:
+          numeric_precision === null ? null : Number(numeric_precision),
+        numeric_scale: numeric_scale === null ? null : Number(numeric_scale),
+      }),
+    );
+    const actualConstraints = [
+      "employees_current_salary_positive",
+      "salary_revisions_new_salary_positive",
+      "salary_revisions_previous_salary_positive",
+      "salary_revisions_employee_id_fkey",
+      "users_email_key",
+      "employees_employee_number_key",
+      "employees_email_key",
+    ].map((conname) => ({ conname }));
+    expect(() =>
+      assertSeedSchemaCompatible(
+        expectedColumns,
+        actualColumns.map((column) =>
+          column.column_name === "current_salary"
+            ? { ...column, numeric_scale: 2 }
+            : column,
+        ),
+        actualConstraints,
+      ),
+    ).toThrow(/incompatible Prisma columns/);
+    expect(() =>
+      assertSeedSchemaCompatible(
+        expectedColumns,
+        actualColumns,
+        actualConstraints,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertSeedSchemaCompatible(expectedColumns, [], actualConstraints),
+    ).toThrow(/missing or has incompatible Prisma columns/);
+    expect(() =>
+      assertSeedSchemaCompatible(expectedColumns, actualColumns, []),
+    ).toThrow(/missing required constraints/);
   });
 });

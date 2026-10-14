@@ -77,7 +77,33 @@ e2e/         Playwright authenticated user journey
    npm run db:seed
    ```
 
-   The seed refuses production, remote hosts, unapproved database names, missing opt-in/allowlist configuration, user accounts, partial data, and anything other than the exact deterministic synthetic dataset. It never deletes or resets records. Use the same explicit opt-in and URL allowlist for a repeat run against the verified baseline dataset.
+   The local seed refuses remote hosts, unapproved database names, missing opt-in/allowlist configuration, user accounts, partial data, and anything other than the exact deterministic synthetic dataset. It never deletes or resets records. Use the same explicit opt-in and URL allowlist for a repeat run against the verified baseline dataset.
+
+### One-time Neon production seed
+
+The standard development/test seed remains restricted to local PostgreSQL. A one-time production run is permitted only when all Neon approvals below are provided to the manually invoked command. It requires the exact connection URL, endpoint hostname, and database name to be approved; verifies every checked-in Prisma migration and required schema constraint; and refuses any existing employee or salary revision rows. Existing HR user rows are preserved. The insert and preflight checks run in one serializable transaction, and a successful run cannot be repeated because the employee/history tables will no longer be empty. It is never part of application startup or a deploy hook.
+
+Before running, confirm the Neon endpoint hostname and database name in the Neon console and confirm the Render backend's `DATABASE_URL` points to that exact endpoint/database. In the Render service Shell (or another trusted shell where `DATABASE_URL` is already injected securely), first check migration status without printing the connection URL. These commands assume the shell starts at the repository root; if Render's Root Directory is `apps/api`, omit `cd apps/api` for the status check and later omit `cd ..`, running `npm run db:seed` from `apps/api` instead:
+
+```sh
+cd apps/api
+npx prisma migrate status
+```
+
+Proceed only if status says the database schema is up to date. Then return to the repository root and manually invoke the existing seed script once, replacing only the hostname and database-name placeholders:
+
+```sh
+cd ..
+NODE_ENV=production \
+SEED_SYNTHETIC_DATA=YES \
+SEED_NEON_ONCE=YES \
+SEED_ALLOWED_DATABASE_URL="$DATABASE_URL" \
+SEED_ALLOWED_NEON_HOST="YOUR-EXACT-ENDPOINT.neon.tech" \
+SEED_ALLOWED_NEON_DATABASE="YOUR-EXACT-DATABASE-NAME" \
+npm run db:seed
+```
+
+Keep `DATABASE_URL` in the Render environment (or a secret manager); do not paste it into source files, logs, or GitHub. Do not add the one-time opt-in/allowlist variables to persistent service environment settings. If migration status is not current, the hostname/database does not match, or the employee/history tables are not empty, the seed aborts without deleting or overwriting data. Do not seed a production database containing real employee data.
 
 6. Provision a local HR account. Enter the password at a hidden prompt rather than placing it in shell history:
 
