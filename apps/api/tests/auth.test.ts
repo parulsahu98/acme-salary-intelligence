@@ -9,6 +9,18 @@ process.env.NODE_ENV = "test";
 const { app } = await import("../src/app.js");
 
 describe("API authentication boundary", () => {
+  it("trusts only the immediate proxy hop for forwarded client addresses", async () => {
+    expect(app.get("trust proxy")).toBe(1);
+
+    const response = await request(app)
+      .post("/api/auth/login")
+      .set("X-Forwarded-For", "203.0.113.10")
+      .send({ email: "not-an-email", password: "" });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe("VALIDATION_ERROR");
+  });
+
   it("rejects unauthenticated employee access without querying employee data", async () => {
     const response = await request(app).get("/api/employees");
     expect(response.status).toBe(401);

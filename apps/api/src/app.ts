@@ -4,7 +4,8 @@ import express, { type ErrorRequestHandler } from "express";
 import { rateLimit } from "express-rate-limit";
 import helmet from "helmet";
 import { z } from "zod";
-import { corsOrigins } from "./config.js";
+import { config, corsOrigins } from "./config.js";
+import { logUnexpectedApiError } from "./diagnostics.js";
 import { prisma } from "./db.js";
 import {
   createEmployeeSchema,
@@ -25,6 +26,7 @@ import {
 const app = express();
 const api = express.Router();
 
+app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(helmet());
 app.use(
@@ -280,10 +282,7 @@ const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
     });
     return;
   }
-  console.error(
-    "Unhandled API error.",
-    error instanceof Error ? error.name : "UnknownError",
-  );
+  logUnexpectedApiError(error, config.NODE_ENV);
   res.status(500).json({
     error: {
       code: "INTERNAL_ERROR",
